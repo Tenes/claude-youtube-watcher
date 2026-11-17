@@ -1,7 +1,7 @@
 {
   "name": "claude-video-vision",
   "version": "1.4.0",
-  "description": "MCP server that gives Claude Code the ability to watch and understand videos — extracts frames via ffmpeg and processes audio via multiple backends",
+  "description": "MCP server that gives Claude Code the ability to watch and understand videos — extracts frames via ffmpeg and transcribes with YouTube captions or local Whisper",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -21,7 +21,6 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "measure": "tsx scripts/measure-tokens.ts",
-    "test:gemini": "tsx scripts/test-gemini-api.ts",
     "prepublishOnly": "npm run build && npm test"
   },
   "dependencies": {
@@ -35,10 +34,6 @@
     "typescript": "^7.0.2",
     "vitest": "^5.0.3"
   },
-  "optionalDependencies": {
-    "@google/genai": "^2.27.0",
-    "openai": "^7.27.0"
-  },
   "keywords": [
     "claude",
     "claude-code",
@@ -48,8 +43,7 @@
     "vision",
     "multimodal",
     "ffmpeg",
-    "whisper",
-    "gemini"
+    "whisper"
   ],
   "author": {
     "name": "Jordan Vasconcelos",

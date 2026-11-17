@@ -1,111 +1,36 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
+import { parseWhisperJson } from "../../src/backends/local.js";
 
-// Capture invocations of execFile so we can inspect the args the python
-// branch passes to the openai-whisper CLI. We mock child_process at the
-// module level so that promisify(execFile) inside src/backends/local.ts
-// resolves to our fake.
-const execFileCalls: Array<{ command: string; args: string[] }> = [];
-
-vi.mock("child_process", () => ({
-  execFile: (
-    command: string,
-    args: string[],
-    _options: unknown,
-    callback: (
-      err: Error | null,
-      result: { stdout: string; stderr: string },
-    ) => void,
-  ) => {
-    execFileCalls.push({ command, args });
-    // Empty-but-valid whisper JSON on stdout; parseWhisperOutput tolerates it.
-    callback(null, { stdout: "{}", stderr: "" });
-  },
-  exec: (
-    _cmd: string,
-    _options: unknown,
-    callback: (
-      err: Error | null,
-      result: { stdout: string; stderr: string },
-    ) => void,
-  ) => {
-    callback(null, { stdout: "", stderr: "" });
-  },
-}));
-
-// Track rmSync calls so we can assert the cleanup path is derived from
-// the input wav rather than hardcoded to "audio.json".
-const rmSyncCalls: string[] = [];
-
-vi.mock("fs", async () => {
-  const actual = await vi.importActual<typeof import("fs")>("fs");
-  return {
-    ...actual,
-    rmSync: (path: string, _options?: unknown) => {
-      rmSyncCalls.push(path);
-    },
-  };
-});
-
-import { transcribeWithWhisper } from "../../src/backends/local.js";
-
-describe("transcribeWithWhisperPython arg construction", () => {
-  beforeEach(() => {
-    execFileCalls.length = 0;
-    rmSyncCalls.length = 0;
+describe("parseWhisperJson", () => {
+  it("parses openai-whisper output (segments in seconds)", () => {
+    const raw = JSON.stringify({
+      text: "Hello there. General Kenobi.",
+      segments: [
+        { start: 0.0, end: 2.4, text: " Hello there." },
+        { start: 65.2, end: 67.9, text: " General Kenobi." },
+      ],
+    });
+    expect(parseWhisperJson(raw)).toEqual([
+      { start: "00:00:00", end: "00:00:02", text: "Hello there." },
+      { start: "00:01:05", end: "00:01:07", text: "General Kenobi." },
+    ]);
   });
 
-  it("does NOT pass --language (openai-whisper rejects 'auto')", async () => {
-    await transcribeWithWhisper("/tmp/scratch/audio.wav", {
-      engine: "python",
-      model: "small",
-      whisperAt: false,
-      modelDir: "",
+  it("parses whisper.cpp output (offsets in milliseconds)", () => {
+    const raw = JSON.stringify({
+      transcription: [
+        { timestamps: { from: "00:00:01,000", to: "00:00:03,500" }, offsets: { from: 1000, to: 3500 }, text: " First line" },
+        { timestamps: { from: "01:00:00,000", to: "01:00:02,000" }, offsets: { from: 3600000, to: 3602000 }, text: "Second" },
+      ],
     });
-
-    expect(execFileCalls).toHaveLength(1);
-    const { command, args } = execFileCalls[0];
-    expect(command).toBe("whisper");
-    expect(args).not.toContain("--language");
-    expect(args).not.toContain("auto");
+    expect(parseWhisperJson(raw)).toEqual([
+      { start: "00:00:01", end: "00:00:03", text: "First line" },
+      { start: "01:00:00", end: "01:00:02", text: "Second" },
+    ]);
   });
 
-  it("passes --output_dir set to dirname(wavPath)", async () => {
-    await transcribeWithWhisper("/tmp/scratch/audio.wav", {
-      engine: "python",
-      model: "small",
-      whisperAt: false,
-      modelDir: "",
-    });
-
-    const { args } = execFileCalls[0];
-    const idx = args.indexOf("--output_dir");
-    expect(idx).toBeGreaterThanOrEqual(0);
-    // Path separator differs by platform; compare with .endsWith for portability.
-    expect(args[idx + 1].replace(/\\/g, "/")).toBe("/tmp/scratch");
-  });
-
-  it("uses 'whisper-at' command when whisperAt option is true", async () => {
-    await transcribeWithWhisper("/tmp/scratch/audio.wav", {
-      engine: "python",
-      model: "small",
-      whisperAt: true,
-      modelDir: "",
-    });
-
-    expect(execFileCalls[0].command).toBe("whisper-at");
-  });
-
-  it("derives cleanup filename from wavPath, not hardcoded 'audio.json'", async () => {
-    await transcribeWithWhisper("/tmp/scratch/temp_abc123.wav", {
-      engine: "python",
-      model: "small",
-      whisperAt: false,
-      modelDir: "",
-    });
-
-    expect(rmSyncCalls).toHaveLength(1);
-    expect(rmSyncCalls[0].replace(/\\/g, "/")).toBe(
-      "/tmp/scratch/temp_abc123.json",
-    );
+  it("drops empty segments", () => {
+    const raw = JSON.stringify({ segments: [{ start: 0, end: 1, text: "  " }, { start: 1, end: 2, text: "ok" }] });
+    expect(parseWhisperJson(raw)).toEqual([{ start: "00:00:01", end: "00:00:02", text: "ok" }]);
   });
 });

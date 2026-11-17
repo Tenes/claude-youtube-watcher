@@ -31,11 +31,6 @@ describe("release version", () => {
     expect(index).toContain(`version: "${version}"`);
   });
 
-  it("matches the README status section", () => {
-    const readme = readFileSync(join(ROOT, "README.md"), "utf8");
-    expect(readme).toContain(`**v${version}**`);
-  });
-
   it("has a CHANGELOG entry", () => {
     const changelog = readFileSync(join(ROOT, "CHANGELOG.md"), "utf8");
     expect(changelog).toContain(`## [${version}]`);

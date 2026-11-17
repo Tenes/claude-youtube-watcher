@@ -10,19 +10,15 @@ import {
   extractFrames,
   calculateAutoFps,
   extractFramesBySegments,
+  extractKeyframes,
+  defaultMaxGapSeconds,
+  DEFAULT_SCENE_THRESHOLD,
   frameFormatExtension,
   frameFormatMimeType,
 } from "../extractors/frames.js";
-import { extractAudio } from "../extractors/audio.js";
-import { analyzeWithGeminiApi } from "../backends/gemini-api.js";
-import { transcribeWithWhisper } from "../backends/local.js";
-import { transcribeWithOpenAI } from "../backends/openai.js";
-import { parseHMS, shiftAudioResult } from "../utils/timestamps.js";
-import {
-  buildCaptionAudioResult,
-  getCaptionFallbackReason,
-  resolveVideoInputDetailed,
-} from "../utils/video-source.js";
+import { parseHMS, shiftAudioResult, formatAudioResult } from "../utils/timestamps.js";
+import { resolveVideoInputDetailed } from "../utils/video-source.js";
+import { getTranscript } from "../utils/transcript.js";
 import { getSessionDir, loadManifest, saveManifest, computeVideoHash } from "../session/manager.js";
 import { createManifest, frameCacheKey, mergeFrames, sampleFrameIndices } from "../session/manifest.js";
 import type { AudioResult, VideoWatchResult, Frame, FrameFormat, Segment, SessionManifest } from "../types.js";
@@ -32,15 +28,6 @@ const CONFIG_PATH = join(homedir(), ".claude-video-vision", "config.json");
 const HMS_REGEX = /^\d{2}:\d{2}:\d{2}$/;
 
 const SESSIONS_DIR = join(homedir(), ".claude-video-vision", "sessions");
-
-const UNCONFIGURED_MESSAGE = `## claude-video-vision is not configured yet!
-
-Please run **/setup-video-vision** to configure the plugin before using it.
-
-Available backends:
-- **Gemini API** — Best quality. Analyzes audio natively. Free tier: 1500 req/day. Requires GEMINI_API_KEY.
-- **Local (Whisper)** — Free, fully offline. Requires whisper.cpp or openai-whisper installed.
-- **OpenAI Whisper API** — Good quality. Requires OPENAI_API_KEY.`;
 
 function timestampToFormattedFilename(timestamp: string, extension: string): string {
   return `${timestamp.replace(/:/g, "-")}.${extension}`;
@@ -107,10 +94,15 @@ export function deriveFps(params: DeriveFpsParams): number {
 export function registerVideoWatch(server: McpServer): void {
   server.tool(
     "video_watch",
-    "Extract frames and process audio from a local video file or YouTube URL. Returns frames (as base64 images or text descriptions) + transcription + audio analysis for Claude to understand the video content. IMPORTANT: For videos longer than 30 seconds, call video_analyze FIRST to get structural data (scene changes, silence, transcription) before calling this tool — use that data to set smart segments with variable FPS. When the video is long enough to trigger audio chunking, the result's `audio.warnings` array (if present) reports chunk-boundary decisions and any per-chunk retries or failures — surface these to the user.",
+    "Extract frames and process audio from a local video file or YouTube URL. Returns frames (as base64 images or text descriptions) + transcription + audio analysis for Claude to understand the video content. To understand a whole video, call this directly with fps: 'keyframes' (no video_analyze needed: it does its own change detection and this tool returns the transcript). For targeted questions on videos longer than 30 seconds, call video_analyze FIRST and use its data to set smart segments with variable FPS. The transcript comes from YouTube captions, else local Whisper if installed; if the audio result has a `transcript_note`, the transcript is missing or partial — tell the user why.",
     {
       path: z.string().describe("Absolute/relative path to the video file, or a YouTube URL"),
-      fps: z.union([z.coerce.number().positive(), z.literal("auto")]).default("auto").describe("Frames per second to extract"),
+      fps: z.union([z.coerce.number().positive(), z.literal("auto"), z.literal("keyframes")]).default("auto").describe(
+        "Frames per second to extract, or \"keyframes\": one frame per visual change (scene cut, new slide) plus one every max_gap seconds, near-duplicates dropped. " +
+        "Usually far fewer frames than a fixed rate for the same coverage — the cheapest way to see a whole video."
+      ),
+      scene_threshold: z.coerce.number().gt(0).lt(1).optional().describe(`keyframes only: ffmpeg scene score (0-1) that counts as a change. Default ${DEFAULT_SCENE_THRESHOLD}; lower (0.05) catches subtle slide edits, higher (0.3-0.4) ignores camera motion in live footage.`),
+      max_gap: z.coerce.number().positive().optional().describe("keyframes only: take a frame at least every N seconds while the picture is changing (static stretches are skipped). Default scales with the window length (15-120 s)."),
       resolution: z.coerce.number().min(128).max(2048).optional().describe("Frame width in px (maintains aspect ratio)"),
       frame_mode: z.enum(["images", "descriptions"]).optional().describe("Return frames as base64 images or text descriptions"),
       frame_format: z.enum(["jpeg", "png", "webp"]).optional().describe("Frame image format for extraction"),
@@ -152,17 +144,11 @@ export function registerVideoWatch(server: McpServer): void {
 
       // 1. Get metadata
       const metadata = await getVideoMetadata(safePath);
-      const captionFallbackReason = resolved.source?.type === "youtube"
-        ? getCaptionFallbackReason(resolved.captions, metadata.duration_seconds)
-        : null;
-
-      if (config.backend === "unconfigured" && !params.skip_audio && captionFallbackReason !== null) {
-        return { content: [{ type: "text", text: UNCONFIGURED_MESSAGE }] };
-      }
 
       // 2. Calculate fps
+      const useKeyframes = params.fps === "keyframes" && !(params.segments && params.segments.length > 0);
       const fps = deriveFps({
-        fps: params.fps,
+        fps: params.fps === "keyframes" ? "auto" : params.fps,
         view_sample: params.view_sample,
         start_time: params.start_time,
         end_time: params.end_time,
@@ -190,6 +176,30 @@ export function registerVideoWatch(server: McpServer): void {
             }
             return segmentFrames;
           });
+        } else if (useKeyframes) {
+          const windowStart = params.start_time ? parseHMS(params.start_time) : 0;
+          const windowEnd = params.end_time ? parseHMS(params.end_time) : metadata.duration_seconds;
+          framesPromise = extractKeyframes(safePath, {
+            resolution,
+            outputDir: framesDir,
+            format: frameFormat,
+            startTime: params.start_time,
+            endTime: params.end_time,
+            maxFrames: config.max_frames,
+            sceneThreshold: params.scene_threshold,
+            maxGapSeconds: params.max_gap ?? defaultMaxGapSeconds(windowEnd - windowStart),
+            windowSeconds: windowEnd - windowStart,
+          }).then((extractedFrames) => {
+            if (useSession && manifest && sessionDir) {
+              manifest = persistFramesToSession(
+                manifest,
+                sessionDir,
+                frameFormat,
+                extractedFrames.map((frame) => ({ ...frame, resolution })),
+              );
+            }
+            return extractedFrames;
+          });
         } else {
           framesPromise = extractFrames(safePath, {
             fps,
@@ -213,50 +223,21 @@ export function registerVideoWatch(server: McpServer): void {
           });
         }
 
-        let audioPromise: Promise<AudioResult>;
-
-        if (params.skip_audio || !metadata.has_audio) {
-          audioPromise = Promise.resolve({ backend: "none" as const, transcription: [], audio_tags: [], full_analysis: null });
-        } else if (captionFallbackReason === null && resolved.captions) {
-          audioPromise = Promise.resolve(
-            buildCaptionAudioResult(resolved.captions, {
-              startTime: params.start_time,
-              endTime: params.end_time,
-            }),
-          );
-        } else if (config.backend === "gemini-api") {
-          audioPromise = analyzeWithGeminiApi(safePath, config, {
-            startTime: params.start_time,
-            endTime: params.end_time,
-          });
-        } else if (config.backend === "openai") {
-          const audioDir = join(workDir, "audio");
-          audioPromise = extractAudio(safePath, audioDir, {
-            startTime: params.start_time,
-            endTime: params.end_time,
-          }).then((wavPath) => transcribeWithOpenAI(wavPath));
-        } else {
-          // local
-          const audioDir = join(workDir, "audio");
-          const modelDir = join(homedir(), ".claude-video-vision", "models");
-          audioPromise = extractAudio(safePath, audioDir, {
-            startTime: params.start_time,
-            endTime: params.end_time,
-          }).then((wavPath) =>
-            transcribeWithWhisper(wavPath, {
-              engine: config.whisper_engine,
-              model: config.whisper_model,
-              whisperAt: config.whisper_at,
-              modelDir,
-            }),
-          );
-        }
+        const audioPromise: Promise<AudioResult> = params.skip_audio
+          ? Promise.resolve({ backend: "none", transcription: [], transcript_note: "skip_audio was set" })
+          : !metadata.has_audio
+            ? Promise.resolve({ backend: "none", transcription: [], transcript_note: "video has no audio track" })
+            : getTranscript(resolved, metadata.duration_seconds, {
+                startTime: params.start_time,
+                endTime: params.end_time,
+                workDir,
+                whisperModel: config.whisper_model,
+              });
 
         let [frames, rawAudio] = await Promise.all([framesPromise, audioPromise]);
 
-        if (captionFallbackReason !== null && rawAudio.backend !== "youtube-captions" && rawAudio.backend !== "none") {
-          rawAudio = { ...rawAudio, transcription_fallback_reason: captionFallbackReason };
-        }
+        // Keyframes stop at max_frames, which would silently drop the end of the video.
+        const keyframesTruncated = useKeyframes && frames.length >= config.max_frames;
 
         // 5. Align audio timestamps with the original video timeline.
         //    Backends return timestamps relative to the cropped audio, but frames
@@ -299,10 +280,18 @@ export function registerVideoWatch(server: McpServer): void {
           content.push({ type: "text", text: `## Session Manifest\n${JSON.stringify(manifestSummary, null, 2)}` });
         }
 
+        if (keyframesTruncated) {
+          content.push({
+            type: "text",
+            text: `## Warning: keyframes truncated
+Hit max_frames (${config.max_frames}) at ${frames[frames.length - 1].timestamp}; later parts of the window may NOT be covered. Re-run with start_time ${frames[frames.length - 1].timestamp} and skip_audio: true (you already have the transcript), or raise scene_threshold / max_gap.`,
+          });
+        }
+
         // Metadata + audio as text
         content.push({
           type: "text",
-          text: `## Video Metadata\n${JSON.stringify(metadata, null, 2)}\n\n## Audio Analysis\n${JSON.stringify(audio, null, 2)}`,
+          text: `## Video Metadata\n${JSON.stringify(metadata, null, 2)}\n\n## Audio Analysis\n${formatAudioResult(audio)}`,
         });
 
         // Frames
@@ -324,7 +313,7 @@ export function registerVideoWatch(server: McpServer): void {
           // descriptions mode — return frame data for the frame-describer agent to process
           content.push({
             type: "text",
-            text: `## Frames (${frames.length} extracted at ${fps} fps)\nFrame mode is "descriptions" — use the frame-describer agent to generate text descriptions of these frames.\n\n${frames.map((f) => `- ${f.timestamp}`).join("\n")}`,
+            text: `## Frames (${frames.length} extracted ${useKeyframes ? "as keyframes" : `at ${fps} fps`})\nFrame mode is "descriptions" — use the frame-describer agent to generate text descriptions of these frames.\n\n${frames.map((f) => `- ${f.timestamp}`).join("\n")}`,
           });
           // Still include images so the agent can describe them
           for (const frame of frames) {

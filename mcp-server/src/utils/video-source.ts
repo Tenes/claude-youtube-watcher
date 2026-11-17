@@ -110,6 +110,7 @@ export function parseSubtitleContent(raw: string): TranscriptionSegment[] {
   const normalized = raw.replace(/\r/g, "");
   const blocks = normalized.split(/\n{2,}/);
   const transcription: TranscriptionSegment[] = [];
+  let previousLines: string[] = [];
 
   for (const block of blocks) {
     const lines = block
@@ -122,7 +123,11 @@ export function parseSubtitleContent(raw: string): TranscriptionSegment[] {
     const [startRaw, endRaw] = lines[timingIndex].split("-->").map((part) => part.trim());
     if (!startRaw || !endRaw) continue;
 
-    const text = decodeSubtitleText(lines.slice(timingIndex + 1).join(" "));
+    // YouTube auto-captions roll: each cue repeats the previous cue's lines before adding a new one.
+    // Keep only lines the previous cue did not show, or the transcript triples in size.
+    const cueLines = lines.slice(timingIndex + 1).map(decodeSubtitleText).filter(Boolean);
+    const text = cueLines.filter((line) => !previousLines.includes(line)).join(" ");
+    previousLines = cueLines;
     if (!text) continue;
 
     transcription.push({
@@ -184,8 +189,12 @@ async function downloadYouTubeVideo(url: string): Promise<string> {
         "--restrict-filenames",
         "--merge-output-format",
         "mp4",
+        // Prefer ~720p (res = shorter side, so vertical Shorts get 720x1280) in H.264, which every
+        // ffmpeg decodes fast; falls back to whatever exists. Keeps download and decode time down.
         "-f",
-        "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
+        "bv*+ba/b",
+        "-S",
+        "res:720,vcodec:h264,ext:mp4:m4a",
         "--paths",
         DOWNLOADS_DIR,
         "-o",
@@ -388,8 +397,6 @@ export function buildCaptionAudioResult(
   return {
     backend: "youtube-captions",
     transcription,
-    audio_tags: [],
-    full_analysis: null,
     transcription_source: captions.source === "subtitles" ? "youtube_subtitles" : "youtube_auto_captions",
     transcription_source_detail: `${captions.language} (${captions.source})`,
   };

@@ -60,15 +60,11 @@ describe("formatHMS", () => {
 
 describe("shiftAudioResult", () => {
   const baseResult: AudioResult = {
-    backend: "local",
+    backend: "local-whisper",
     transcription: [
       { start: "00:00:00", end: "00:00:05", text: "hello" },
       { start: "00:00:05", end: "00:00:10", text: "world" },
     ],
-    audio_tags: [
-      { start: "00:00:02", end: "00:00:08", tag: "music" },
-    ],
-    full_analysis: null,
   };
 
   it("returns the same reference when offset is zero", () => {
@@ -84,16 +80,9 @@ describe("shiftAudioResult", () => {
     expect(shifted.transcription[1].end).toBe("00:00:20");
   });
 
-  it("adds offset to all audio_tags timestamps", () => {
-    const shifted = shiftAudioResult(baseResult, 10);
-    expect(shifted.audio_tags[0].start).toBe("00:00:12");
-    expect(shifted.audio_tags[0].end).toBe("00:00:18");
-  });
-
-  it("preserves tag labels and transcription text", () => {
+  it("preserves transcription text", () => {
     const shifted = shiftAudioResult(baseResult, 10);
     expect(shifted.transcription[0].text).toBe("hello");
-    expect(shifted.audio_tags[0].tag).toBe("music");
   });
 
   it("handles minute-scale offsets", () => {
@@ -113,39 +102,9 @@ describe("shiftAudioResult", () => {
     expect(JSON.stringify(baseResult)).toBe(snapshot);
   });
 
-  it("preserves the backend and full_analysis fields", () => {
+  it("preserves the backend field", () => {
     const shifted = shiftAudioResult(baseResult, 10);
-    expect(shifted.backend).toBe("local");
-    expect(shifted.full_analysis).toBeNull();
+    expect(shifted.backend).toBe("local-whisper");
   });
 
-  it("preserves warnings field through spread when shifting", () => {
-    const input: AudioResult = {
-      backend: "gemini-api",
-      transcription: [{ start: "00:00:00", end: "00:00:05", text: "hi" }],
-      audio_tags: [],
-      full_analysis: null,
-      warnings: [
-        { chunk_index: 0, chunk_total: 2, time_range: "00:00:00-00:10:00", event: "hard_cut", detail: "no silence" },
-      ],
-    };
-    const result = shiftAudioResult(input, 60);
-    expect(result.warnings).toBeDefined();
-    expect(result.warnings).toHaveLength(1);
-    expect(result.warnings![0].event).toBe("hard_cut");
-  });
-
-  it("preserves warnings even when offset is 0 (returns input unchanged)", () => {
-    const input: AudioResult = {
-      backend: "gemini-api",
-      transcription: [],
-      audio_tags: [],
-      full_analysis: null,
-      warnings: [
-        { chunk_index: 0, chunk_total: 1, time_range: "00:00:00-00:05:00", event: "retry", detail: "transient" },
-      ],
-    };
-    const result = shiftAudioResult(input, 0);
-    expect(result.warnings).toEqual(input.warnings);
-  });
 });

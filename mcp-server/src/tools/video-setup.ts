@@ -1,58 +1,39 @@
-import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { checkDependencies } from "../utils/installer.js";
-import { checkCommand, detectPlatform, recommendWhisperModel } from "../utils/platform.js";
+import { checkCommand, detectPlatform } from "../utils/platform.js";
+import { detectWhisperEngine, resolveWhisperModel } from "../backends/local.js";
 
 export function registerVideoSetup(server: McpServer): void {
   server.tool(
     "video_setup",
-    "Check dependencies for video perception (ffmpeg, whisper, gemini api, optional yt-dlp for YouTube URLs).",
-    {
-      backend: z.enum(["gemini-api", "local", "openai"]).describe("Audio processing backend"),
-      whisper_engine: z.enum(["cpp", "python"]).default("cpp"),
-      whisper_model: z.enum(["tiny", "base", "small", "medium", "large-v3-turbo", "large-v3", "auto"]).default("auto"),
-    },
-    async ({ backend, whisper_engine, whisper_model }) => {
-      const platform = detectPlatform();
-      const result = await checkDependencies(backend, whisper_engine);
-      const hasYtDlp = await checkCommand("yt-dlp");
+    "Check what is installed: ffmpeg (required), yt-dlp (YouTube URLs) and local Whisper (optional, transcribes videos without captions). Nothing needs configuring.",
+    {},
+    async () => {
+      const { os } = detectPlatform();
+      const install = (win: string, mac: string, linux: string) => (os === "windows" ? win : os === "macos" ? mac : linux);
 
-      const resolvedModel = whisper_model === "auto"
-        ? recommendWhisperModel(platform.ram_gb)
-        : whisper_model;
+      const [ffmpeg, ffprobe, ytDlp, whisper] = await Promise.all([
+        checkCommand("ffmpeg"),
+        checkCommand("ffprobe"),
+        checkCommand("yt-dlp"),
+        detectWhisperEngine(),
+      ]);
 
-      let report = `## Platform Detected\n`;
-      report += `- OS: ${platform.os}\n`;
-      report += `- Architecture: ${platform.arch}\n`;
-      report += `- GPU: ${platform.gpu}\n`;
-      report += `- RAM: ${platform.ram_gb}GB (${platform.free_ram_gb}GB free)\n\n`;
-      report += `## Backend: ${backend}\n\n`;
+      const lines = [
+        "## Dependencies",
+        ffmpeg && ffprobe
+          ? "- ffmpeg: ready"
+          : `- ffmpeg: **missing (required)** — \`${install("winget install Gyan.FFmpeg", "brew install ffmpeg", "sudo apt install ffmpeg")}\``,
+        ytDlp
+          ? "- yt-dlp: ready"
+          : `- yt-dlp: missing (needed for YouTube URLs) — \`${install("winget install yt-dlp.yt-dlp", "brew install yt-dlp", "pipx install yt-dlp")}\``,
+        whisper
+          ? `- local Whisper: ready (${whisper === "cpp" ? "whisper.cpp" : "openai-whisper"}, model ${await resolveWhisperModel("auto")} by default)`
+          : "- local Whisper: not installed (optional) — without it, videos with no YouTube captions and local files get no transcript. Install: `pip install openai-whisper`",
+        "",
+        ffmpeg && ffprobe ? "**Ready.** Restart Claude Code after installing anything so the new commands are on PATH." : "**Install ffmpeg, then restart Claude Code.**",
+      ];
 
-      if (backend === "local") {
-        report += `- Whisper engine: ${whisper_engine}\n`;
-        report += `- Recommended model: ${resolvedModel}\n\n`;
-      }
-
-      report += `## YouTube URL Support\n`;
-      if (hasYtDlp) {
-        report += `- Status: Ready (\`yt-dlp\` found)\n\n`;
-      } else {
-        const install = platform.os === "macos" ? "brew install yt-dlp" : "pipx install yt-dlp";
-        report += `- Status: Missing optional dependency\n`;
-        report += `- Install: \`${install}\`\n\n`;
-      }
-
-      if (result.status === "ready") {
-        report += `## Status: Ready\nAll dependencies are installed.`;
-      } else {
-        report += `## Status: Missing Dependencies\n\n`;
-        for (let i = 0; i < result.instructions.length; i++) {
-          report += `${i + 1}. \`${result.instructions[i]}\`\n`;
-        }
-        report += `\n**Please install the missing dependencies and run video_setup again.**`;
-      }
-
-      return { content: [{ type: "text", text: report }] };
+      return { content: [{ type: "text", text: lines.join("\n") }] };
     },
   );
 }

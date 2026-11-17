@@ -38,17 +38,6 @@ claude --plugin-dir /path/to/claude-video-vision
 6. Commit with a clear message (`feat:`, `fix:`, `docs:`, `chore:`, `refactor:`)
 7. Open a pull request against `main`
 
-## Adding a new backend
-
-Backends live in `mcp-server/src/backends/`. To add one:
-
-1. Create `your-backend.ts` implementing the audio processing interface
-2. Export an `analyzeWithYourBackend(wavPath)` function returning `AudioResult`
-3. Wire it into `mcp-server/src/tools/video-watch.ts`
-4. Add the backend name to the `Backend` type in `types.ts`
-5. Update `video-configure.ts` and `video-setup.ts` to support it
-6. Update the setup wizard in `commands/setup-video-vision.md`
-
 ## Code style
 
 - TypeScript strict mode — no `any` unless genuinely necessary
@@ -60,7 +49,7 @@ Backends live in `mcp-server/src/backends/`. To add one:
 
 Open an issue using the bug report template. Include:
 - Your OS and Node.js version
-- The backend you're using
+- Whether local Whisper is installed (`video_setup` reports it)
 - The exact command or action that triggered the bug
 - Any error output from `~/.claude-video-vision/` logs or MCP stderr
 

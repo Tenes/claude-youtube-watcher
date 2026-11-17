@@ -17,30 +17,29 @@ describe("config", () => {
 
   it("returns default config when no file exists", () => {
     const config = loadConfig(join(TEST_DIR, "config.json"));
-    expect(config.backend).toBe("unconfigured");
+    expect(config.whisper_model).toBe("auto");
     expect(config.frame_mode).toBe("images");
     expect(config.frame_format).toBe("jpeg");
     expect(config.frame_resolution).toBe(512);
     expect(config.default_fps).toBe("auto");
     expect(config.max_frames).toBe(100);
-    expect(config.whisper_engine).toBe("cpp");
     expect(config.frame_describer_model).toBe("sonnet");
   });
 
   it("saves and loads config", () => {
     const configPath = join(TEST_DIR, "config.json");
-    const custom = { ...defaultConfig, backend: "local" as const, frame_resolution: 768 };
+    const custom = { ...defaultConfig, whisper_model: "small" as const, frame_resolution: 768 };
     saveConfig(configPath, custom);
     const loaded = loadConfig(configPath);
-    expect(loaded.backend).toBe("local");
+    expect(loaded.whisper_model).toBe("small");
     expect(loaded.frame_resolution).toBe(768);
   });
 
   it("merges partial config with defaults", () => {
     const configPath = join(TEST_DIR, "config.json");
-    writeFileSync(configPath, JSON.stringify({ backend: "openai" }));
+    writeFileSync(configPath, JSON.stringify({ whisper_model: "tiny" }));
     const loaded = loadConfig(configPath);
-    expect(loaded.backend).toBe("openai");
+    expect(loaded.whisper_model).toBe("tiny");
     expect(loaded.frame_mode).toBe("images");
     expect(loaded.frame_format).toBe("jpeg");
     expect(loaded.max_frames).toBe(100);
@@ -60,22 +59,5 @@ describe("config", () => {
     expect(loaded.enable_index).toBe(true);
     expect(loaded.session_max_age_days).toBe(7);
     expect(loaded.downloads_max_age_days).toBe(7);
-  });
-
-  it("returns defaults for new audio fields", () => {
-    const config = loadConfig(join(TEST_DIR, "config.json"));
-    expect(config.audio_model).toBe("gemini-3-flash-preview");
-    expect(config.audio_max_output_tokens).toBe(65536);
-    expect(config.audio_chunk_trigger_seconds).toBe(1200);
-    expect(config.audio_chunk_size_seconds).toBe(600);
-    expect(config.audio_chunk_overlap_seconds).toBe(0);
-  });
-
-  it("preserves audio_model override when set", () => {
-    const configPath = join(TEST_DIR, "config.json");
-    writeFileSync(configPath, JSON.stringify({ audio_model: "gemini-3.1-pro-preview" }));
-    const loaded = loadConfig(configPath);
-    expect(loaded.audio_model).toBe("gemini-3.1-pro-preview");
-    expect(loaded.audio_max_output_tokens).toBe(65536);
   });
 });

@@ -1,15 +1,12 @@
-export type Backend = "gemini-api" | "local" | "openai" | "youtube-captions" | "unconfigured" | "none";
-export type WhisperEngine = "cpp" | "python";
+export type Backend = "youtube-captions" | "local-whisper" | "none";
 export type WhisperModel = "tiny" | "base" | "small" | "medium" | "large-v3-turbo" | "large-v3" | "auto";
 export type FrameMode = "images" | "descriptions";
 export type FrameFormat = "jpeg" | "png" | "webp";
 export type DescriberModel = "opus" | "sonnet" | "haiku";
 
 export interface Config {
-  backend: Backend;
-  whisper_engine: WhisperEngine;
+  /** Local Whisper model for videos without captions. "auto" = base on CPU, large-v3-turbo with a GPU. */
   whisper_model: WhisperModel;
-  whisper_at: boolean;
   frame_mode: FrameMode;
   frame_format: FrameFormat;
   frame_resolution: number;
@@ -19,11 +16,6 @@ export interface Config {
   enable_index: boolean;
   session_max_age_days: number;
   downloads_max_age_days: number;
-  audio_model: string;
-  audio_max_output_tokens: number;
-  audio_chunk_trigger_seconds: number;
-  audio_chunk_size_seconds: number;
-  audio_chunk_overlap_seconds: number; // reserved: dedup post-processor TBD; default 0 = no overlap
 }
 
 export interface VideoMetadata {
@@ -52,21 +44,13 @@ export interface TranscriptionSegment {
   text: string;
 }
 
-export interface AudioTag {
-  start: string;
-  end: string;
-  tag: string;
-}
-
 export interface AudioResult {
   backend: Backend;
   transcription: TranscriptionSegment[];
-  audio_tags: AudioTag[];
-  full_analysis: string | null;
-  transcription_source?: "youtube_subtitles" | "youtube_auto_captions" | "gemini-api" | "local_whisper" | "openai" | "none";
+  transcription_source?: "youtube_subtitles" | "youtube_auto_captions";
   transcription_source_detail?: string;
-  transcription_fallback_reason?: string;
-  warnings?: ChunkWarning[];
+  /** Why there is no transcript, or why the one given is partial. */
+  transcript_note?: string;
 }
 
 export interface VideoWatchResult {
@@ -120,7 +104,7 @@ export interface VideoAnalysis {
   frame_stats: FrameStats[];
   loudness_summary?: { mean_lufs: number; range_lu: number };
   transcription?: TranscriptionSegment[];
-  audio_warnings?: ChunkWarning[];
+  transcript_note?: string;
   /** Set when the ffmpeg pass stopped early: filter results only cover up to `analyzed_until`. */
   incomplete?: AnalysisIncomplete;
   content_profile: string;
@@ -146,21 +130,4 @@ export interface Segment {
   end: string;
   fps: number;
   resolution?: number;
-}
-
-export interface ChunkPlan {
-  start: number;
-  actual_start: number;
-  end: number;
-  index: number;
-  total: number;
-  clean_cut: boolean;
-}
-
-export interface ChunkWarning {
-  chunk_index: number;
-  chunk_total: number;
-  time_range: string;
-  event: "retry" | "failed" | "hard_cut" | "loose_threshold";
-  detail?: string;
 }

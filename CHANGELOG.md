@@ -4,6 +4,56 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - YouTube Watcher fork
+
+Forked from [jordanrendric/claude-video-vision](https://github.com/jordanrendric/claude-video-vision) v1.4.0.
+Measured on a 19-minute lecture: about 17k tokens to watch the whole video, against about 90k for
+upstream, which also stopped at 8:20.
+
+### Added
+
+- **`fps: "keyframes"` on `video_watch`.** It takes one frame per visual change instead of a fixed
+  rate. ffmpeg decodes I-frames only, then picks frames by scene score with a minimum 2 s spacing and
+  a maximum gap, so static stretches are still sampled. If too few frames come out, it falls back to
+  a 1 fps pre-filter. The new `scene_threshold` and `max_gap` parameters tune it. On the test video
+  it returned 64 frames covering the whole video in 0.3 s, against 100 frames covering 8:20 in 6.8 s.
+- **Compact transcripts.** YouTube rolling auto-captions repeat the previous line in every cue. They
+  are now de-duplicated and sent once, as `[HH:MM:SS] text` blocks of about 20 s, instead of JSON:
+  about 4.8k tokens instead of about 35k sent twice.
+- **Automatic local Whisper fallback.** Videos without captions, and local files, are transcribed
+  with whisper.cpp (`whisper-cli`) or openai-whisper (`whisper`) when either is installed. No
+  configuration is needed. The model is chosen automatically: `base` on CPU, `large-v3-turbo` with
+  a GPU. When nothing can transcribe, `transcript_note` tells Claude why.
+- **Persistent notes.** The skill writes `~/.claude-video-vision/notes/<video id>.md` after watching
+  and reads it first next time.
+- **Two watching paths in the skill:**
+  - whole video: keyframes and transcript in one call;
+  - targeted question: `video_analyze`, then segments, then `video_detail`.
+
+### Changed
+
+- **Local-only.** The plugin uses only your Claude Code session and local tools: no API keys, no
+  accounts, no cloud services.
+- **`video_setup` only checks dependencies.** It reports ffmpeg, ffprobe, yt-dlp and Whisper, with
+  install commands for each OS. The setup wizard is gone.
+- **YouTube downloads are capped at 720p H.264.** That is enough for frames at 1024 px and quick to
+  decode.
+- **The plugin runs the local build.** `.mcp.json` points at `mcp-server/dist` instead of the npm
+  package.
+
+### Removed
+
+- The Gemini and OpenAI backends, audio chunking, audio tags, `@google/genai` and `openai`.
+- The `backend`, `whisper_engine`, `whisper_at` and `audio_*` config options.
+
+### Fixed
+
+- **openai-whisper was passed `--model auto`,** which it rejects. The model is now resolved first.
+- **openai-whisper's console output was parsed as JSON,** so the whole transcript came back as one
+  block at 00:00:00. The JSON output file is now read instead.
+- **Typechecking only passed because `@google/genai` happened to load Node's types.** `tsconfig.json`
+  now declares them.
+
 ## [1.4.0] - 2026-10-05
 
 ### Changed

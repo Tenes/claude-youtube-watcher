@@ -11,24 +11,19 @@ Parse the user's input to extract:
 2. **Prompt** — any question or instruction about the video (optional)
 3. **Flags** — `--fps <number>`, `--resolution <number>` (optional)
 
-Then follow this workflow **in order — do NOT skip step 2**:
+Then follow the **video-perception** skill's workflow in order: check the notes file, call
+`video_info`, then pick ONE path:
 
-1. Call `video_info` on the path/URL to verify it's a valid video and get duration.
-   For YouTube URLs, the MCP server downloads the video with `yt-dlp` and uses
-   YouTube subtitles/auto-captions before falling back to the configured audio backend.
+- **No prompt, or a question about the video as a whole** → Path A: `video_watch` with
+  `fps: "keyframes"`, no `video_analyze`.
+- **A question about a specific moment or visual property** → Path B: `video_analyze` (videos > 30s),
+  then `video_watch` with segments, then `video_detail` to drill in.
 
-2. **REQUIRED for videos > 30s:** Call `video_analyze` BEFORE `video_watch`. This is NOT optional.
-   Use filters: `scene_changes: true, silence: true, transcription: true` at minimum.
-   Add other filters based on the user's question (motion, blur, exposure, loudness, etc.).
-   The analysis tells you WHERE to look — use it to plan smart frame extraction.
+If the user passed `--fps` or `--resolution`, use them instead of the skill's defaults.
 
-3. Call `video_watch`:
-   - **Short videos (< 2 min):** Use `fps: "auto"` without `view_sample` — full coverage to avoid missing brief moments.
-   - **Long videos (> 2 min):** Use `segments` with variable FPS based on analysis data. Use `view_sample` to limit initial frames.
-
-4. If the user asks for more detail on a specific moment, use `video_detail` to drill in with higher FPS/resolution on a 3-5 second window. Use `view_sample: 3` first, then request specific timestamps.
-
-5. If the user provided a prompt/question, answer it based on the video content.
-6. If no prompt was provided, give a comprehensive summary of what happens in the video.
+Then:
+1. If the user provided a prompt/question, answer it based on the video content.
+2. If no prompt was provided, give a comprehensive summary of what happens in the video.
+3. Write or update the notes file as the skill describes.
 
 If `video_watch` fails with a setup error, call `video_setup` first, then retry.

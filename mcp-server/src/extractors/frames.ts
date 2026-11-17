@@ -1,6 +1,6 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { readFileSync, readdirSync, mkdirSync, mkdtempSync, existsSync } from "fs";
+import { readFileSync, readdirSync, mkdirSync, mkdtempSync, existsSync, rmSync } from "fs";
 import { join } from "path";
 import type { VideoMetadata, Frame, FrameFormat, Segment } from "../types.js";
 import { formatHMS, parseHMS } from "../utils/timestamps.js";
@@ -90,6 +90,22 @@ function isMissingWebpEncoderError(error: unknown): boolean {
   );
 }
 
+async function runFfmpeg(args: string[], format: FrameFormat): Promise<string> {
+  try {
+    const { stderr } = await execFileAsync("ffmpeg", args, { maxBuffer: 64 * 1024 * 1024 });
+    return stderr;
+  } catch (error) {
+    if (format === "webp" && isMissingWebpEncoderError(error)) {
+      throw new Error(
+        "WebP frame extraction requires an ffmpeg build with a WebP encoder (libwebp). " +
+          "Use frame_format='jpeg' or frame_format='png', or install an ffmpeg build such as ffmpeg-full.",
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+}
+
 export async function extractFrames(
   videoPath: string,
   options: ExtractFramesOptions,
@@ -131,18 +147,7 @@ export async function extractFrames(
     join(outputDir, `frame_%04d.${extension}`),
   );
 
-  try {
-    await execFileAsync("ffmpeg", args);
-  } catch (error) {
-    if (format === "webp" && isMissingWebpEncoderError(error)) {
-      throw new Error(
-        "WebP frame extraction requires an ffmpeg build with a WebP encoder (libwebp). " +
-          "Use frame_format='jpeg' or frame_format='png', or install an ffmpeg build such as ffmpeg-full.",
-        { cause: error },
-      );
-    }
-    throw error;
-  }
+  await runFfmpeg(args, format);
 
   const files = readdirSync(outputDir)
     .filter((f) => f.startsWith("frame_") && f.endsWith(`.${extension}`))
@@ -159,6 +164,144 @@ export async function extractFrames(
     return {
       timestamp,
       image: base64,
+      format,
+      sourcePath: filePath,
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Keyframe extraction: one frame per visual change instead of a fixed rate
+// ---------------------------------------------------------------------------
+
+export const DEFAULT_SCENE_THRESHOLD = 0.1;
+/** Minimum spacing between change-triggered frames: stops bursts on fast cuts and same-second timestamp collisions. */
+const MIN_SCENE_SPACING_SECONDS = 2;
+
+/** Default max gap between keyframes: ~50 gap frames over the window, clamped to 15-120 s. */
+export function defaultMaxGapSeconds(windowSeconds: number): number {
+  return Math.min(120, Math.max(15, Math.round(windowSeconds / 50)));
+}
+
+/**
+ * ffmpeg filter chain for keyframe selection. Input is I-frames only (-skip_frame nokey),
+ * typically 2-5 s apart, so fades and animated transitions register as changes.
+ * - mpdecimate drops frames nearly identical to the previous one (static slides, pauses)
+ * - select keeps the first frame, each scene change (at most one per 2 s), and at least
+ *   one frame every maxGapSeconds of non-static video
+ * - showinfo logs pts_time of each kept frame; setpts then renumbers so the image muxer
+ *   writes one file per kept frame (portable alternative to -fps_mode vfr, which needs ffmpeg 5.1+)
+ */
+export function keyframeFilter(resolution: number, sceneThreshold: number, maxGapSeconds: number, prefilter = ""): string {
+  return (
+    `${prefilter}scale=${resolution}:-2,mpdecimate,` +
+    `select='isnan(prev_selected_t)` +
+    `+gt(scene,${sceneThreshold})*gte(t-prev_selected_t,${MIN_SCENE_SPACING_SECONDS})` +
+    `+gte(t-prev_selected_t,${maxGapSeconds})',` +
+    `showinfo,setpts=N/FRAME_RATE/TB`
+  );
+}
+
+export function parseShowinfoTimes(stderr: string): number[] {
+  return [...stderr.matchAll(/Parsed_showinfo.*?pts_time:\s*(-?[\d.]+)/g)].map((m) => parseFloat(m[1]));
+}
+
+export interface ExtractKeyframesOptions {
+  resolution: number;
+  outputDir: string;
+  format?: FrameFormat;
+  startTime?: string;
+  endTime?: string;
+  maxFrames?: number;
+  sceneThreshold?: number;
+  maxGapSeconds: number;
+  /** Length of the window being scanned; used to detect when I-frames are too sparse. */
+  windowSeconds: number;
+}
+
+// shortcut: dedupe only compares consecutive frames, so cutting back to an earlier slide yields a second copy; add perceptual hashing if that proves costly.
+export async function extractKeyframes(
+  videoPath: string,
+  options: ExtractKeyframesOptions,
+): Promise<Frame[]> {
+  const {
+    resolution,
+    outputDir,
+    format = "jpeg",
+    startTime,
+    endTime,
+    maxFrames = 100,
+    sceneThreshold = DEFAULT_SCENE_THRESHOLD,
+    maxGapSeconds,
+    windowSeconds,
+  } = options;
+
+  // Fast path: decode I-frames only (~40x faster). If the window holds too few I-frames
+  // (narrow window, long-GOP recording), redo it decoding everything, sampled at 1 fps.
+  const minExpected = Math.max(1, Math.floor(windowSeconds / maxGapSeconds / 2));
+  try {
+    const frames = await runKeyframePass(videoPath, options, true);
+    if (frames.length >= Math.min(minExpected, maxFrames)) return frames;
+  } catch {
+    // ffmpeg fails outright when no I-frame falls inside the window; the fallback handles it.
+  }
+  rmSync(outputDir, { recursive: true, force: true });
+  return runKeyframePass(videoPath, options, false);
+}
+
+async function runKeyframePass(
+  videoPath: string,
+  options: ExtractKeyframesOptions,
+  iFramesOnly: boolean,
+): Promise<Frame[]> {
+  const {
+    resolution,
+    outputDir,
+    format = "jpeg",
+    startTime,
+    endTime,
+    maxFrames = 100,
+    sceneThreshold = DEFAULT_SCENE_THRESHOLD,
+    maxGapSeconds,
+  } = options;
+  const extension = frameFormatExtension(format);
+
+  if (!existsSync(outputDir)) mkdirSync(outputDir, { recursive: true });
+
+  const args: string[] = ["-nostats"];
+  if (iFramesOnly) args.push("-skip_frame", "nokey");
+  if (startTime) args.push("-ss", startTime);
+  args.push("-i", videoPath);
+  if (endTime) {
+    const durationSeconds = parseHMS(endTime) - (startTime ? parseHMS(startTime) : 0);
+    args.push("-t", String(durationSeconds));
+  }
+  args.push(
+    "-an",
+    "-vf", keyframeFilter(resolution, sceneThreshold, maxGapSeconds, iFramesOnly ? "" : "fps=1,"),
+    "-frames:v", String(maxFrames),
+    ...frameQualityArgs(format),
+    join(outputDir, `frame_%04d.${extension}`),
+  );
+
+  const times = parseShowinfoTimes(await runFfmpeg(args, format));
+
+  const files = readdirSync(outputDir)
+    .filter((f) => f.startsWith("frame_") && f.endsWith(`.${extension}`))
+    .sort();
+
+  // showinfo may log a trailing frame past -frames:v, never fewer than were written.
+  if (times.length < files.length) {
+    throw new Error(`Keyframe timestamps missing: ${files.length} frames written but ${times.length} timestamps parsed from ffmpeg.`);
+  }
+
+  const offsetSeconds = startTime ? parseHMS(startTime) : 0;
+
+  return files.map((file, index) => {
+    const filePath = join(outputDir, file);
+    return {
+      timestamp: formatHMS(offsetSeconds + times[index]),
+      image: readFileSync(filePath).toString("base64"),
       format,
       sourcePath: filePath,
     };

@@ -5,16 +5,10 @@ import { mkdirSync, rmSync, existsSync, readFileSync } from "fs";
 import { tmpdir } from "os";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { loadConfig } from "../config.js";
-import {
-  buildCaptionAudioResult,
-  getCaptionFallbackReason,
-  resolveVideoInputDetailed,
-} from "../utils/video-source.js";
+import { resolveVideoInputDetailed } from "../utils/video-source.js";
 import { getVideoMetadata } from "../extractors/frames.js";
-import { extractAudio } from "../extractors/audio.js";
-import { analyzeWithGeminiApi } from "../backends/gemini-api.js";
-import { transcribeWithWhisper } from "../backends/local.js";
-import { transcribeWithOpenAI } from "../backends/openai.js";
+import { formatTranscript } from "../utils/timestamps.js";
+import { getTranscript } from "../utils/transcript.js";
 import {
   buildAnalysisCommand,
   DEFAULT_SCDET_THRESHOLD,
@@ -59,7 +53,7 @@ export const sceneChangesSchema = z
 export function registerVideoAnalyze(server: McpServer): void {
   server.tool(
     "video_analyze",
-    "Analyze local video file or YouTube URL structure using ffmpeg filters. Returns scene changes, silence intervals, motion levels, and more. Use this before video_watch to plan which segments need detailed frame extraction. Does not extract frames. When transcription is enabled and the video is longer than the configured chunk trigger, the audio is chunked and transcribed in parallel; the result's `analysis.audio_warnings` array (when present) describes chunk-boundary decisions, retries, or failures — surface these to the user. If `analysis.incomplete` is present, the ffmpeg pass stopped early and filter results only cover the source up to `analysis.incomplete.analyzed_until` — tell the user instead of treating later sections as empty.",
+    "Analyze local video file or YouTube URL structure using ffmpeg filters. Returns scene changes, silence intervals, motion levels, and more. Use this before video_watch to plan which segments need detailed frame extraction. Does not extract frames. If `analysis.transcript_note` is present, the transcript is missing or partial — tell the user why. If `analysis.incomplete` is present, the ffmpeg pass stopped early and filter results only cover the source up to `analysis.incomplete.analyzed_until` — tell the user instead of treating later sections as empty.",
     {
       path: z.string().describe("Absolute/relative path to the video file, or a YouTube URL"),
       filters: z.object({
@@ -95,7 +89,7 @@ export function registerVideoAnalyze(server: McpServer): void {
         transcription: z
           .boolean()
           .default(false)
-          .describe("Transcribe audio using configured backend"),
+          .describe("Include the transcript: YouTube captions, else local Whisper if installed"),
       }),
     },
     async (params) => {
@@ -218,47 +212,12 @@ export function registerVideoAnalyze(server: McpServer): void {
 
         // 7. Handle transcription separately (not an ffmpeg filter)
         if (filters.transcription && metadata.has_audio) {
-          let audioResult: AudioResult;
-          const captionFallbackReason = resolved.source?.type === "youtube"
-            ? getCaptionFallbackReason(resolved.captions, metadata.duration_seconds)
-            : null;
-
-          if (captionFallbackReason === null && resolved.captions) {
-            audioResult = buildCaptionAudioResult(resolved.captions);
-          } else if (config.backend === "gemini-api") {
-            audioResult = await analyzeWithGeminiApi(safePath, config);
-          } else if (config.backend === "openai") {
-            const audioDir = join(workDir, "audio");
-            const wavPath = await extractAudio(safePath, audioDir, {});
-            audioResult = await transcribeWithOpenAI(wavPath);
-          } else if (config.backend === "local") {
-            const audioDir = join(workDir, "audio");
-            const modelDir = join(homedir(), ".claude-video-vision", "models");
-            const wavPath = await extractAudio(safePath, audioDir, {});
-            audioResult = await transcribeWithWhisper(wavPath, {
-              engine: config.whisper_engine,
-              model: config.whisper_model,
-              whisperAt: config.whisper_at,
-              modelDir,
-            });
-          } else {
-            // unconfigured or none — skip transcription gracefully
-            audioResult = {
-              backend: "none",
-              transcription: [],
-              audio_tags: [],
-              full_analysis: null,
-            };
-          }
-
-          if (captionFallbackReason !== null && audioResult.backend !== "youtube-captions" && audioResult.backend !== "none") {
-            audioResult = { ...audioResult, transcription_fallback_reason: captionFallbackReason };
-          }
-
+          const audioResult = await getTranscript(resolved, metadata.duration_seconds, {
+            workDir,
+            whisperModel: config.whisper_model,
+          });
           analysis.transcription = audioResult.transcription;
-          if (audioResult.warnings && audioResult.warnings.length > 0) {
-            analysis.audio_warnings = audioResult.warnings;
-          }
+          if (audioResult.transcript_note) analysis.transcript_note = audioResult.transcript_note;
         }
 
         // Ensure content_profile is set when motion filter was not requested
@@ -284,18 +243,20 @@ export function registerVideoAnalyze(server: McpServer): void {
         rmSync(workDir, { recursive: true, force: true });
       }
 
-      // 11. Return JSON as text content
+      // 11. Return JSON as text content; the transcript goes as timestamped lines (much cheaper than JSON)
+      const { transcription, ...analysisRest } = analysis;
       const output = {
         ...(resolved.source ? { source: resolved.source } : {}),
         metadata,
-        analysis,
+        analysis: analysisRest,
       };
 
       return {
         content: [
           {
             type: "text" as const,
-            text: JSON.stringify(output, null, 2),
+            text: JSON.stringify(output, null, 2) +
+              (transcription && transcription.length > 0 ? `\n\n## Transcript\n${formatTranscript(transcription)}` : ""),
           },
         ],
       };

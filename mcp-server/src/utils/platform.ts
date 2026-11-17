@@ -48,10 +48,3 @@ export async function checkCommand(command: string): Promise<boolean> {
     return false;
   }
 }
-
-export function recommendWhisperModel(ram_gb: number): string {
-  if (ram_gb < 4) return "tiny";
-  if (ram_gb < 8) return "small";
-  if (ram_gb < 16) return "large-v3-turbo";
-  return "large-v3";
-}

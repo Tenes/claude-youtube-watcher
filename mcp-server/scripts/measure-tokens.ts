@@ -22,7 +22,7 @@ import { mkdirSync, rmSync } from "fs";
 import { getEncoding } from "js-tiktoken";
 import { homedir, tmpdir } from "os";
 import { join } from "path";
-import { transcribeWithWhisper } from "../src/backends/local.js";
+import { detectWhisperEngine, transcribeWithWhisper } from "../src/backends/local.js";
 import { loadConfig } from "../src/config.js";
 import { extractAudio } from "../src/extractors/audio.js";
 import {
@@ -99,12 +99,9 @@ async function processVideo(videoPath: string, config: MeasureConfig) {
       const wavPath = await extractAudio(videoPath, audioDir);
       const persisted = loadConfig(CONFIG_PATH);
       const modelDir = join(homedir(), ".claude-video-vision", "models");
-      audio = await transcribeWithWhisper(wavPath, {
-        engine: persisted.whisper_engine,
-        model: persisted.whisper_model,
-        whisperAt: persisted.whisper_at,
-        modelDir,
-      });
+      const engine = await detectWhisperEngine();
+      if (!engine) throw new Error("Local Whisper is not installed; pass --no-audio or install openai-whisper.");
+      audio = await transcribeWithWhisper(wavPath, { engine, model: persisted.whisper_model, modelDir });
     }
 
     return { metadata, fps, frames, audio };

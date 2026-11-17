@@ -10,7 +10,7 @@
   "plugins": [
     {
       "name": "claude-video-vision",
-      "description": "Give Claude the ability to watch and understand videos — extracts frames via ffmpeg and processes audio via Gemini API, local Whisper, or OpenAI API. Multimodal perception layer for Claude Code.",
+      "description": "Give Claude the ability to watch and understand videos — extracts frames via ffmpeg and transcribes with YouTube captions or local Whisper, all locally. Multimodal perception layer for Claude Code.",
       "version": "1.4.0",
       "source": "./",
       "category": "productivity",
@@ -25,8 +25,7 @@
         "multimodal",
         "ffmpeg",
         "whisper",
-        "gemini",
-        "perception"
+                "perception"
       ]
     }
   ]

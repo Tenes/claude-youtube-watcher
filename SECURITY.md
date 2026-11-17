@@ -28,13 +28,11 @@ In scope:
 Out of scope:
 - Issues in upstream dependencies (report to their maintainers)
 - Issues specific to Claude Code itself
-- Misconfiguration of user-provided API keys
 
 ## Sensitive data
 
 This plugin handles:
 - Video files provided by the user
-- API keys (`GEMINI_API_KEY`, `OPENAI_API_KEY`) from the environment
 - Transcribed audio content
 
-None of these are logged or transmitted except to the configured backend (local whisper, Gemini API, or OpenAI API).
+None of these are logged or transmitted anywhere: all processing is local.

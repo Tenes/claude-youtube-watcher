@@ -13,21 +13,41 @@ You have access to video understanding tools via the claude-video-vision MCP ser
 - `video_watch` — Extract frames + process audio from a video. Supports variable FPS/resolution per segment.
 - `video_detail` — Drill into specific segments. Separates extraction from viewing — extract many frames, view few at a time.
 - `video_info` — Get video metadata without processing.
-- `video_configure` — Change settings (backend, resolution, enable_index, etc.).
-- `video_setup` — Check/install dependencies.
+- `video_configure` — Change settings (resolution, max_frames, whisper_model, enable_index, etc.).
+- `video_setup` — Check what is installed (ffmpeg, yt-dlp, optional local Whisper).
 
 ## Workflow
 
-**IMPORTANT: You MUST follow these steps in order. Do NOT skip step 2.**
+**Follow these steps in order.**
+
+0. **Check your notes first.** Notes live in `.claude-video-vision/notes/` under the user's home
+   directory (`%USERPROFILE%` on Windows, `$HOME` elsewhere); always use the absolute path, since
+   `~` is not expanded by file tools. The file is `<key>.md`, where `<key>` is the YouTube video ID
+   (e.g. `dQw4w9WgXcQ`) or, for a local file, its name without extension.
+   - YouTube: if the file exists, answer from it where it covers the question.
+   - Local file: names collide, so first run step 1 and check that the notes' source path and
+     duration match `video_info`. If they don't, ignore the file.
+   Extract frames only for what the notes do not cover, then add what you learn to the file.
 
 1. Always start with `video_info` to get duration, resolution, and audio presence.
    If the user gives a YouTube URL, pass the URL directly as `path`.
-   The MCP server downloads it with `yt-dlp`, prefers YouTube subtitles/auto-captions
-   for transcription, and falls back to the configured audio backend only when
-   captions are missing, empty, or suspiciously incomplete.
+   The MCP server downloads it with `yt-dlp`. Everything runs locally: the transcript comes from
+   YouTube subtitles/auto-captions, else from local Whisper if it is installed. If the audio result
+   has a `transcript_note`, the transcript is missing or partial: tell the user why, and rely on
+   the frames for what the transcript does not cover.
 
-2. **REQUIRED for videos > 30s:** Call `video_analyze` BEFORE extracting any frames.
-   This is NOT optional — it gives you structural data to make smart extraction decisions.
+2. **Pick ONE path:**
+
+   **Path A — understand the whole video** (summarize, take notes, "what does this video show",
+   lectures, tutorials, talks): call `video_watch` with `fps: "keyframes"` and no `video_analyze`.
+   Keyframes does its own change detection and `video_watch` returns the transcript, so analyzing
+   first would decode the video twice and put the transcript in context twice. Then go to step 5.
+
+   **Path B — a targeted question** (a specific moment, a visual property, a short clip, "the first
+   second", frozen parts, lighting): continue with steps 3-4.
+
+3. **(Path B, videos > 30s)** Call `video_analyze` BEFORE extracting any frames.
+   It gives you structural data to make smart extraction decisions.
    Select filters relevant to the user's question:
 
    | User intent | Filters to select |
@@ -38,7 +58,6 @@ You have access to video understanding tools via the claude-video-vision MCP ser
    | "Is this a talking head or action?" | motion |
    | "When does the music start?" | silence, loudness |
    | "Analyze the lighting" | exposure |
-   | "Summarize this lecture" | transcription, scene_changes, silence |
    | General / unclear intent | scene_changes, silence, transcription |
 
    Always include `transcription: true` when the video has audio — the transcription
@@ -48,18 +67,23 @@ You have access to video understanding tools via the claude-video-vision MCP ser
    transitions (dissolves, slow fades), pass `scene_changes: { threshold: 4 }`; if
    handheld or fast-moving footage floods the list, raise it (e.g. `{ threshold: 15 }`).
 
-3. Use the analysis results and transcription to plan your frame extraction strategy:
+4. **(Path B)** Plan and run `video_watch` from the analysis and transcription:
    - Low FPS (0.1-0.5) for static or predictable segments
    - Higher FPS (1-3) only around scene changes, motion peaks, or moments
      referenced in speech ("look at this", "as you can see", "let me show you")
    - Never exceed the minimum FPS needed for the task
    - Prefer fewer segments at lower FPS — you can always drill deeper
+   - **Short videos (< 2 minutes):** `fps: "auto"` without `view_sample` — full coverage so brief moments aren't missed.
+   - **Long videos (> 2 minutes):** `segments` with variable FPS, and `view_sample` to limit the initial frame count.
 
-4. Call `video_watch` to extract frames:
-   - For **short videos (< 2 minutes):** Use `fps: "auto"` without `view_sample` — short videos need full coverage to avoid missing brief moments. The auto FPS already adapts to duration.
-   - For **long videos (> 2 minutes):** Use `segments` based on analysis data with variable FPS, and `view_sample` to limit initial frame count. You can always drill deeper with `video_detail`.
+   **Keyframes details (Path A):** you get one frame per visual change (new slide, cut, diagram
+   appearing, at most one per 2 s) plus one every `max_gap` seconds while the picture changes, with
+   near-duplicates dropped. Lower `scene_threshold` (0.05) for slide decks with tiny edits; raise it
+   (0.3-0.4) for handheld or fast-moving footage. If the result warns it was truncated, call again from
+   the timestamp it gives with `skip_audio: true` — you already have the transcript.
 
-5. Use `video_detail` to drill into specific moments:
+5. Use `video_detail` to drill into specific moments (both paths — e.g. to read small on-screen text
+   at 1024+ px after a keyframes overview):
    - Start with 3-5 second windows around points of interest
    - Use `view_sample: 3` to preview (first, middle, last frame)
    - Then request specific timestamps with `view` if you need more detail
@@ -72,9 +96,19 @@ You have access to video understanding tools via the claude-video-vision MCP ser
    already have at the same resolution. Do not re-request frames you
    already have in context.
 
+7. **Write notes after watching** (skip only for videos under a minute or one-off visual checks).
+   Save to the absolute notes path from step 0 (same key), containing:
+   - title, source URL or absolute path, duration, date watched
+   - coverage: which time ranges you actually saw frames for, and at what resolution, so a later
+     session can tell "not shown in the video" from "not looked at"
+   - a timestamped outline: for each point, what is said AND what is shown
+     (`[02:14] Explains cache eviction — slide: LRU diagram with 4 boxes, arrow from tail to head`)
+   - any on-screen text, code, numbers or chart values worth keeping verbatim
+   Describe visuals in words: the frames are not kept, so the notes must stand without them.
+
 ## Parameter Guide
 
-**fps:** `"auto"` for general overview. Use the video's original fps (from `video_info`) for frame-by-frame detail. Use 5-10 for analyzing specific short moments. Use 0.1-0.5 for long videos.
+**fps:** `"keyframes"` for a whole-video overview at the lowest cost. `"auto"` for a uniform sample. Use the video's original fps (from `video_info`) for frame-by-frame detail. Use 5-10 for analyzing specific short moments. Use 0.1-0.5 for long videos.
 
 **resolution:** 256-512 for quick scans. 512-768 for normal analysis. 1024+ when reading on-screen text or fine details.
 
@@ -94,7 +128,6 @@ You receive:
 - **Manifest** (when enable_index is on) — index of all cached frames by resolution and timestamp. Use this to avoid redundant requests.
 - **Frames** as images — look at them to understand what's happening visually
 - **Audio transcription** with timestamps — read the speech content
-- **Audio tags** — non-speech events (music, sounds, etc.)
 - **Analysis data** — scene changes, silence intervals, motion levels, etc.
 
 Combine all sources to form a complete understanding. Use analysis + transcription to guide where you look visually. The analysis tells you WHEN things happen; the frames tell you WHAT happens.
