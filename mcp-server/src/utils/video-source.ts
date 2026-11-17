@@ -1,8 +1,8 @@
 import { execFile } from "child_process";
 import { createHash } from "crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "fs";
-import { homedir, tmpdir } from "os";
-import { resolve, join } from "path";
+import { homedir } from "os";
+import { basename, dirname, resolve, join } from "path";
 import { promisify } from "util";
 import type { AudioResult, TranscriptionSegment } from "../types.js";
 import { formatHMS, parseHMS } from "./timestamps.js";
@@ -174,55 +174,87 @@ function findDownloadedPath(stdout: string): string | null {
   return null;
 }
 
-async function downloadYouTubeVideo(url: string): Promise<string> {
+// Captions are written next to the video under the same name (`<prefix>-<id>.<lang>.srt`). With
+// --no-overwrites a re-watch finds them on disk and never calls YouTube's rate-limited caption endpoint.
+function captionArgs(track: YouTubeCaptionTrackMetadata): string[] {
+  return [
+    track.source === "subtitles" ? "--write-subs" : "--write-auto-subs",
+    "--sub-langs",
+    track.language,
+    "--sub-format",
+    "srt/vtt/best",
+    // yt-dlp re-downloads subtitles by default and deletes the cached file when that request fails.
+    "--no-overwrites",
+  ];
+}
+
+function outputArgs(url: string): string[] {
+  return ["--paths", DOWNLOADS_DIR, "-o", `${cachePrefixForUrl(url)}-%(id)s.%(ext)s`];
+}
+
+async function downloadYouTubeVideo(url: string, captionTrack: YouTubeCaptionTrackMetadata | null): Promise<string> {
   mkdirSync(DOWNLOADS_DIR, { recursive: true });
 
-  const prefix = cachePrefixForUrl(url);
-  const outputTemplate = `${prefix}-%(id)s.%(ext)s`;
+  const args = [
+    "--no-playlist",
+    "--no-warnings",
+    "--restrict-filenames",
+    "--merge-output-format",
+    "mp4",
+    // Prefer ~720p (res = shorter side, so vertical Shorts get 720x1280) in H.264, which every
+    // ffmpeg decodes fast; falls back to whatever exists. Keeps download and decode time down.
+    "-f",
+    "bv*+ba/b",
+    "-S",
+    "res:720,vcodec:h264,ext:mp4:m4a",
+    ...outputArgs(url),
+    "--print",
+    "after_move:filepath",
+  ];
+  // Fetching captions in the same run reuses one YouTube session instead of opening a second one
+  // in parallel, which is what got the caption request rate-limited (HTTP 429). --ignore-errors keeps
+  // a failed caption download from failing the video download.
+  if (captionTrack) args.push(...captionArgs(captionTrack), "--ignore-errors");
+  args.push(url);
 
+  let stdout = "";
+  let failure: any = null;
   try {
-    const { stdout } = await execFileAsync(
-      "yt-dlp",
-      [
-        "--no-playlist",
-        "--no-warnings",
-        "--restrict-filenames",
-        "--merge-output-format",
-        "mp4",
-        // Prefer ~720p (res = shorter side, so vertical Shorts get 720x1280) in H.264, which every
-        // ffmpeg decodes fast; falls back to whatever exists. Keeps download and decode time down.
-        "-f",
-        "bv*+ba/b",
-        "-S",
-        "res:720,vcodec:h264,ext:mp4:m4a",
-        "--paths",
-        DOWNLOADS_DIR,
-        "-o",
-        outputTemplate,
-        "--print",
-        "after_move:filepath",
-        url,
-      ],
-      {
-        timeout: 20 * 60 * 1000,
-        maxBuffer: 10 * 1024 * 1024,
-        encoding: "utf-8",
-      },
-    );
-
-    const downloadedPath = findDownloadedPath(stdout);
-    if (!downloadedPath) {
-      throw new Error("yt-dlp completed but did not report a downloaded file path");
-    }
-
-    return validateRegularFile(downloadedPath);
+    ({ stdout } = await execFileAsync("yt-dlp", args, {
+      timeout: 20 * 60 * 1000,
+      maxBuffer: 10 * 1024 * 1024,
+      encoding: "utf-8",
+    }));
   } catch (err: any) {
     if (err?.code === "ENOENT") {
       throw new Error("yt-dlp is required for YouTube URLs but was not found. Run /setup-video-vision for installation instructions.");
     }
-    const detail = err?.stderr || err?.message || String(err);
+    // With --ignore-errors yt-dlp exits non-zero when only the captions failed; the video may be fine.
+    stdout = typeof err?.stdout === "string" ? err.stdout : "";
+    failure = err;
+  }
+
+  const downloadedPath = findDownloadedPath(stdout);
+  if (!downloadedPath) {
+    const detail = failure ? failure.stderr || failure.message || String(failure) : "yt-dlp did not report a downloaded file path";
     throw new Error(`Failed to download YouTube video with yt-dlp: ${detail}`);
   }
+  return validateRegularFile(downloadedPath);
+}
+
+/** Reads the caption file yt-dlp wrote next to `videoPath`, if any. */
+export function readCaptionsBesideVideo(
+  videoPath: string,
+  track: YouTubeCaptionTrackMetadata,
+): YouTubeCaptionResult | null {
+  const dir = dirname(videoPath);
+  const stem = basename(videoPath).replace(/\.[^.]+$/, "");
+  const file = readdirSync(dir).find(
+    (name) => name.startsWith(`${stem}.`) && (name.endsWith(".srt") || name.endsWith(".vtt")),
+  );
+  if (!file) return null;
+  const transcription = parseSubtitleContent(readFileSync(join(dir, file), "utf-8"));
+  return { ...track, transcription, coverage_seconds: getTranscriptCoverageSeconds(transcription) };
 }
 
 function chooseCaptionTrack(data: Record<string, unknown>): YouTubeCaptionTrackMetadata | null {
@@ -293,60 +325,29 @@ async function fetchYouTubeInfo(url: string): Promise<{
   }
 }
 
-async function fetchYouTubeCaptions(
+const CAPTION_RETRY_DELAY_MS = 5_000;
+
+/** Captions for a downloaded video: from disk, else one delayed retry (YouTube's 429s are short-lived). */
+async function getYouTubeCaptions(
   url: string,
-  captionTrack: YouTubeCaptionTrackMetadata | null,
+  videoPath: string,
+  track: YouTubeCaptionTrackMetadata | null,
 ): Promise<YouTubeCaptionResult | null> {
-  if (!captionTrack) return null;
+  if (!track) return null;
+  const cached = readCaptionsBesideVideo(videoPath, track);
+  if (cached) return cached;
 
-  const workDir = join(tmpdir(), `cvv-youtube-captions-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  mkdirSync(workDir, { recursive: true });
-
+  await new Promise((done) => setTimeout(done, CAPTION_RETRY_DELAY_MS));
   try {
-    const args = [
-      "--skip-download",
-      "--no-playlist",
-      "--sub-langs",
-      captionTrack.language,
-      "--sub-format",
-      "srt/vtt/best",
-      "-o",
-      join(workDir, "%(id)s.%(ext)s"),
-    ];
-
-    if (captionTrack.source === "subtitles") {
-      args.push("--write-subs");
-    } else {
-      args.push("--write-auto-subs");
-    }
-    args.push(url);
-
-    await execFileAsync("yt-dlp", args, {
-      timeout: 60_000,
-      maxBuffer: 10 * 1024 * 1024,
-      encoding: "utf-8",
-    });
-
-    // yt-dlp names files with the video id, which is not known here for all URL
-    // forms. Scan the temporary directory as a fallback.
-    const candidateExtensions = ["srt", "vtt"];
-    for (const file of readdirSync(workDir)) {
-      if (candidateExtensions.some((ext) => file.endsWith(`.${ext}`))) {
-        const transcription = parseSubtitleContent(readFileSync(join(workDir, file), "utf-8"));
-        return {
-          ...captionTrack,
-          transcription,
-          coverage_seconds: getTranscriptCoverageSeconds(transcription),
-        };
-      }
-    }
-
-    return null;
+    await execFileAsync(
+      "yt-dlp",
+      ["--skip-download", "--no-playlist", "--no-warnings", "--restrict-filenames", ...captionArgs(track), ...outputArgs(url), url],
+      { timeout: 60_000, maxBuffer: 10 * 1024 * 1024, encoding: "utf-8" },
+    );
   } catch {
-    return null;
-  } finally {
-    rmSync(workDir, { recursive: true, force: true });
+    // Still rate-limited or no track: the caller falls back to local Whisper.
   }
+  return readCaptionsBesideVideo(videoPath, track);
 }
 
 export function getTranscriptCoverageSeconds(transcription: TranscriptionSegment[]): number {
@@ -405,10 +406,8 @@ export function buildCaptionAudioResult(
 export async function resolveVideoInputDetailed(input: string): Promise<ResolvedVideoInput> {
   if (isYouTubeUrl(input)) {
     const info = await fetchYouTubeInfo(input);
-    const [path, captions] = await Promise.all([
-      downloadYouTubeVideo(input),
-      fetchYouTubeCaptions(input, info.captionTrack),
-    ]);
+    const path = await downloadYouTubeVideo(input, info.captionTrack);
+    const captions = await getYouTubeCaptions(input, path, info.captionTrack);
     return { path, source: info.source, captions: captions ?? undefined };
   }
 

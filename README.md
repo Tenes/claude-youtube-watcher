@@ -30,6 +30,7 @@ Vasconcelos (MIT), rebuilt around low token cost and local-only processing.
    | Node.js 24+ | `winget install OpenJS.NodeJS.LTS` | `brew install node` | your package manager |
    | ffmpeg (required) | `winget install Gyan.FFmpeg` | `brew install ffmpeg` | `sudo apt install ffmpeg` |
    | yt-dlp (YouTube URLs) | `winget install yt-dlp.yt-dlp` | `brew install yt-dlp` | `pipx install yt-dlp` |
+   | deno (recommended, helps yt-dlp avoid YouTube rate limits) | `winget install DenoLand.Deno` | `brew install deno` | `curl -fsSL https://deno.land/install.sh \| sh` |
    | Whisper (optional) | `pip install openai-whisper` | `brew install whisper-cpp` | `pip install openai-whisper` |
 
 2. Build the MCP server:
@@ -64,7 +65,9 @@ Claude picks one of two paths:
 
 ## Transcripts
 
-1. YouTube manual subtitles, then YouTube auto-captions.
+1. YouTube manual subtitles, then YouTube auto-captions. They are downloaded together with the
+   video and kept next to it, so watching again makes no caption request. If YouTube rate-limits
+   the caption download (HTTP 429), it is retried once after 5 s.
 2. Local Whisper, if installed — for videos without captions and for local files. `whisper-cli`
    (whisper.cpp) is preferred when found, else `whisper` (openai-whisper). The model is chosen
    automatically: `base` without a GPU, `large-v3-turbo` with one. Models download once to

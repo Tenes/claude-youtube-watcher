@@ -41,6 +41,13 @@ upstream, which also stopped at 8:20.
 - **The plugin runs the local build.** `.mcp.json` points at `mcp-server/dist` instead of the npm
   package.
 
+- **YouTube captions are fetched in the same yt-dlp run as the video** and cached next to it.
+  Before, the caption download ran in a separate yt-dlp session at the same time as the video
+  download, and YouTube often rejected it with HTTP 429. If captions are still missing, they are
+  retried once after 5 s. A re-watch reads the cached file and makes no caption request.
+- **`video_setup` recommends deno.** yt-dlp needs a JavaScript runtime for YouTube; without one,
+  YouTube rejects more requests.
+
 ### Removed
 
 - The Gemini and OpenAI backends, audio chunking, audio tags, `@google/genai` and `openai`.
